@@ -1,0 +1,146 @@
+---
+title: "Weight Lifting Exercise Quality"
+author: "Eric Vaitl"
+date: "June 25, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache=TRUE)
+require(ggplot2)
+require(plyr)
+require(splines)
+require(dplyr)
+require(caret)
+require(randomForest)
+require(doParallel)
+require(nnet)
+require(kernlab)
+require(rpart)
+require(MASS)
+require(klaR)
+require(gbm)
+require(survival)
+set.seed(42)
+registerDoParallel(cores=10)
+```
+
+## Introduction
+
+
+## Procedure
+
+First, we have to have some data to play with. The assignment has a training set. However, the test set in the assignment is misnamed. It is the data for answering an online test. To test our models we need to split the training set. 
+
+First, let's load the data if needed: 
+
+```{r, warning=FALSE}
+load_data <- function(){
+    if(exists("pml_training") && exists("pml_testing")){
+        return()
+    }
+    training_file <- "pml-training.csv"
+    testing_file <- "pml-testing.csv"
+    location <- "https://d396qusza40orc.cloudfront.net/predmachlearn/"
+    nastrings <- c(NA, '""', '#DIV/0!')
+    if(!file.exists(training_file)){
+        training_url <- paste(location, training_file, sep='') 
+        download(training_url, training_file)            
+    } 
+    if(!file.exists(testing_file)){
+        testing_url <- paste(location, testing_file, sep='')
+        download(testing_url, testing_file)
+    }
+    pml_training <<- read.csv("pml-training.csv", header=TRUE,na.strings = nastrings)
+    classes <- unlist(lapply(pml_training,class))
+    # Use colClasses to make sure the types in the test set match the training set. If 
+    # we don't, we have problems later. 
+    # Unfortunately, the test set quotes values in the first column, which the training
+    # set doesn't do. 
+    classes[1]='character'
+    pml_testing <<- read.csv("pml-testing.csv", header=TRUE, na.strings = nastrings,
+                             colClasses = classes)
+}
+load_data()
+```
+
+Remove obvious fields, like names, dates, and test numbers. Move the independent variable to the front. Remove the near zero variablity columns. Then use the caret::preProcess function to do centering, scailing, box-cox transform, and PCA on the remaining columns. 
+
+This data processing process with cost us interperability, but the interperability of the various fields is minimal (at least for me). Somebody who knows what "kurtosis_roll_arm" means might care about interperability, but I don't. 
+
+Finally, do a split. We will train on train_xform, test on test_xform. 
+
+```{r}
+
+create_preProcess <- function(){
+    # near zero variance columns. 
+    nzv_cols<-nearZeroVar(pml_training)
+    # Colmuns of mainly NAs. 
+    na_cols <- 
+        which(sapply(pml_training,function(y)sum(length(which(is.na(y)))))>.8*ncol(pml_training))
+    removed_cols <<- unique(sort(c(nzv_cols, na_cols, 1,2,3,4,5,160)))
+    preProcValues <<- preProcess(pml_training[,-removed_cols], 
+                                 method=c('nzv','center','scale','BoxCox','pca'))
+}
+preprocess_data<- function(df){
+    ret<-cbind(df[,160],predict(preProcValues, df[,-removed_cols]))
+    names(ret)[1]<-'classe'
+    return(ret)
+}
+create_preProcess()
+pml_training_transformed <- preprocess_data(pml_training)
+trainIndex <- createDataPartition(pml_training_transformed$classe,p=.7,list=FALSE)
+train_xform <- pml_training_transformed[trainIndex,]
+test_xform <- pml_training_transformed[-trainIndex,]
+val_xform <- preprocess_data(pml_testing)
+```
+
+I'll try several models with cross validation to pick model parameters. I'll try to pick the top several independent models to combine with a GAM for the final model. I know this is overkill, but I want to experiment with combining several models. 
+
+I would like to use the caretEnsemble package to combine multiple models, but it doesn't seem to work on multiclass classification problems yet. 
+
+```{r}
+mod1 <- train(classe~.,data=train_xform,method='lda')
+pred1 <- predict(mod1, test_xform)
+sum(pred1==test_xform$classe)
+mod2 <- train(classe~.,data=train_xform,method='gbm',verbose=FALSE)
+pred2 <- predict(mod2, test_xform)
+sum(pred2==test_xform$classe)
+mod3 <- train(classe~.,data=train_xform,method='rf')
+pred3 <- predict(mod3, test_xform)
+sum(pred3==test_xform$classe)
+mod4 <- train(classe~.,data=train_xform,method='knn')
+pred4 <- predict(mod4, test_xform)
+sum(pred4==test_xform$classe)
+mod5 <- train(classe~.,data=train_xform,method='nnet', trace=FALSE)
+pred5 <- predict(mod5, test_xform)
+sum(pred5==test_xform$classe)
+mod6 <- train(classe~.,data=train_xform,method='svmRadial')
+pred6 <- predict(mod6, test_xform)
+sum(pred6==test_xform$classe)
+mod7 <- train(classe~.,data=train_xform,method='rpart')
+pred7 <- predict(mod7, test_xform)
+sum(pred7==test_xform$classe)
+```
+
+Models 3, 4 and 6 (rf, knn, svmRadial) seem to be best with 5765, 5676, and 5381 correct answers out of a possible 5885 on the test set. rpart performed worst with 2339, followed by lda at 3086 and nnet at 3705. The difference between the poor models and the good ones is quite significant on this data set. 
+
+I'll use a random forest to create the ensemble model using the three best models.  
+```{r}
+predDF <- data.frame(classe=test_xform$classe, pred3, pred4, pred6)
+mod_comb <- train(classe~., method='rf', data=predDF)
+comb_pred <- predict(mod_comb, predDF)
+```
+
+Final quiz predictions are: 
+```{r}
+pred3v <- predict(mod3, val_xform)
+pred4v <- predict(mod4, val_xform)
+pred6v <- predict(mod6, val_xform)
+predVDF <- data.frame(pred3=pred3v,pred4=pred4v,pred6=pred6v)
+v_pred <- predict(mod_comb, predVDF)
+v_pred
+```
+
+ [1] B A B A A E D B A A B C B A E E A B B B
