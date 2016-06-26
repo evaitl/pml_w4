@@ -27,7 +27,9 @@ registerDoParallel(cores=10)
 ```
 
 ## Introduction
+This project is a multi-level classification problem. We start with 159 prediction columns; after eliminations, filtering, and transformations, I end up with 19622 observations with 25 predictors. All of the useful predictors are numbers and the outcome is a factor with 5 levels. 
 
+Because the outcome is a multi-level factor, it is difficult to do correlations or heatmaps involving the outcome. Instead, I present several tables comparing predictor outcomes as well as the number of correct responses for each predictor. 
 
 ## Procedure
 
@@ -65,11 +67,13 @@ load_data <- function(){
 load_data()
 ```
 
-Remove obvious fields, like names, dates, and test numbers. Move the independent variable to the front. Remove the near zero variablity columns. Then use the caret::preProcess function to do centering, scailing, box-cox transform, and PCA on the remaining columns. 
+Remove obvious fields, like names, dates, and test numbers. Move the independent variable to the front. Remove the near zero variability columns. Then use the caret::preProcess function to do centering, scaling, box-cox transform, and PCA on the remaining columns. 
 
 This data processing process with cost us interperability, but the interperability of the various fields is minimal (at least for me). Somebody who knows what "kurtosis_roll_arm" means might care about interperability, but I don't. 
 
-Finally, do a split. We will train on train_xform, test on test_xform. 
+The preprocessing is necessary for better fits of some of the training algorithms, like lda. 
+
+Finally, do a split. We will train on train_xform, test on test_xform. val_xform is the data for the online quiz that is part of the project. 
 
 ```{r}
 
@@ -79,6 +83,7 @@ create_preProcess <- function(){
     # Colmuns of mainly NAs. 
     na_cols <- 
         which(sapply(pml_training,function(y)sum(length(which(is.na(y)))))>.8*ncol(pml_training))
+    # Also throw out dates, times, names, and the outcome column before pre-processing. 
     removed_cols <<- unique(sort(c(nzv_cols, na_cols, 1,2,3,4,5,160)))
     preProcValues <<- preProcess(pml_training[,-removed_cols], 
                                  method=c('nzv','center','scale','BoxCox','pca'))
@@ -96,9 +101,11 @@ test_xform <- pml_training_transformed[-trainIndex,]
 val_xform <- preprocess_data(pml_testing)
 ```
 
-I'll try several models with cross validation to pick model parameters. I'll try to pick the top several independent models to combine with a GAM for the final model. I know this is overkill, but I want to experiment with combining several models. 
+I'll try several models with cross validation to pick model parameters. I'll try to pick the top several independent models to combine with a random forest for the final model. I know this is overkill, but I want to experiment with combining several models. 
 
-I would like to use the caretEnsemble package to combine multiple models, but it doesn't seem to work on multiclass classification problems yet. 
+I would like to use the caretEnsemble package to combine multiple models, but it doesn't seem to work on multiclass classification problems yet. In the meantime, I just muddle through stacking models manually. 
+
+I used the default trainControl(), which uses bootstrap with 10 resamplings with 75% of the data in each sample (From the documentation of train and trainControl). 
 
 ```{r}
 mod1 <- train(classe~.,data=train_xform,method='lda')
@@ -126,12 +133,24 @@ sum(pred7==test_xform$classe)
 
 Models 3, 4 and 6 (rf, knn, svmRadial) seem to be best with 5765, 5676, and 5381 correct answers out of a possible 5885 on the test set. rpart performed worst with 2339, followed by lda at 3086 and nnet at 3705. The difference between the poor models and the good ones is quite significant on this data set. 
 
+An ensemble model may work well with these three. There are 59 (out of 5885 or 1%) cases where the three models have the same incorrect match. This isn't really fair though as the test set is also what is used to train the combination model. The cross tables look reasonably spread out: 
+```{r}
+sum(pred3==pred4 & pred3==pred6 & pred3 != test_xform$classe )
+table(pred3, pred4)
+table(pred3, pred6)
+table(pred4, pred6)
+```
+
+
 I'll use a random forest to create the ensemble model using the three best models.  
 ```{r}
 predDF <- data.frame(classe=test_xform$classe, pred3, pred4, pred6)
 mod_comb <- train(classe~., method='rf', data=predDF)
 comb_pred <- predict(mod_comb, predDF)
+confusionMatrix(comb_pred, test_xform$classe)
 ```
+
+The resulting model is about 99% accurate. 
 
 Final quiz predictions are: 
 ```{r}
@@ -143,4 +162,13 @@ v_pred <- predict(mod_comb, predVDF)
 v_pred
 ```
 
+<!--
  [1] B A B A A E D B A A B C B A E E A B B B
+-->
+## Conclusion
+
+Prediction variables were filtered and munged beyond recognition by centering, scaling, box-cox transformation, and PCA. This allowed a number of models from different schools of thought to be applied. The three best independent models were then saved for an ensemble model. 
+
+The ensemble model created is a random forest combination of rf, knn, and svnRadial submodels. It tests out at about 99% accurate on the test data. For the online quiz of 20 data points, this model was 100% correct. 
+
+The results here are pretty good compared to techniques that were available a few years ago. 
